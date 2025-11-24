@@ -33,6 +33,16 @@ The database is designed to represent the hierarchical structure of delivery ope
 *   **Key Fields:** `zone_id`, `depot_id`.
 *   **Role:** Defines which Depot is responsible for serving which Service Zone.
 
+### 6. H3 Coverage (`H3Cover`)
+*   **What it is:** A lookup table storing the H3 cells that make up a shape.
+*   **Key Fields:** `owner_kind` (Area/Zone), `owner_id`, `resolution`, `cell` (H3 Index).
+*   **Role:** Enables fast spatial lookups (e.g., "Which zone is this point in?") without complex geometry calculations.
+
+### 7. H3 Compact (`H3Compact`)
+*   **What it is:** Compressed storage of H3 coverage.
+*   **Key Fields:** `owner_kind`, `owner_id`, `cells_compact` (Array of H3 Indices).
+*   **Role:** Optimized storage for retrieving the full shape of a zone or area.
+
 ---
 
 ## 🌱 Seed Data Generation
