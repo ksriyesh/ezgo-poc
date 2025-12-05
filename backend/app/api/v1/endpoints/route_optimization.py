@@ -31,69 +31,37 @@ def optimize_routes(
     4. Run OR-Tools VRP solver
     5. Return optimized routes (not persisted to database)
     """
-    
-    logger.info(f"🚀 Starting route optimization for depot: {request.depot_id}")
-    print(f"\n{'='*80}")
-    print(f"[DEBUG] 🚀 NEW ROUTE OPTIMIZATION REQUEST")
-    print(f"{'='*80}")
-    print(f"Request data: {request.model_dump()}")
-    print(f"Depot ID: {request.depot_id}")
-    print(f"Use Clustering: {request.use_clustering}")
-    print(f"Min Cluster Size: {request.min_cluster_size}")
-    print(f"Num Vehicles: {request.num_vehicles}")
-    print(f"Order IDs: {request.order_ids[:3] if request.order_ids else 'ALL'}")
-    print(f"{'='*80}\n")
+    logger.info(f"Starting route optimization for depot: {request.depot_id}")
     
     # 1. Get depot
     depot = crud.depot.get(db=db, id=request.depot_id)
     if not depot:
-        logger.error(f"❌ Depot not found: {request.depot_id}")
+        logger.error(f"Depot not found: {request.depot_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Depot not found"
         )
     
-    print(f"🏭 [DEBUG] Depot Details:")
-    print(f"   Name: {depot.name}")
-    print(f"   ID: {depot.id}")
-    print(f"   Drivers: {depot.available_drivers}")
-    print(f"   Location: ({depot.latitude}, {depot.longitude})")
-    print()
-    logger.info(f"✅ Depot found: {depot.name} (ID: {depot.id}, drivers: {depot.available_drivers})")
+    logger.info(f"Depot found: {depot.name} (drivers: {depot.available_drivers})")
     
     # 2. Get orders
     if request.order_ids:
-        # Fetch specific orders
-        logger.info(f"📦 Fetching {len(request.order_ids)} specific orders...")
+        logger.info(f"Fetching {len(request.order_ids)} specific orders")
         orders = [crud.order.get(db=db, id=oid) for oid in request.order_ids]
         orders = [o for o in orders if o is not None]
     else:
-        # Fetch all orders for depot
-        logger.info(f"📦 Fetching ALL orders for depot {depot.name}")
+        logger.info(f"Fetching all orders for depot {depot.name}")
         orders = crud.order.get_by_depot(
             db=db,
             depot_id=request.depot_id,
-            delivery_date=None,  # Get all orders
+            delivery_date=None,
             limit=1000
         )
     
-    logger.info(f"📊 Found {len(orders)} orders to optimize")
-    print(f"\n[DEBUG] Orders fetched: {len(orders)}")
-    if orders:
-        print(f"[DEBUG] First 3 orders:")
-        for i, order in enumerate(orders[:3]):
-            print(f"  {i+1}. {order.order_number} - {order.customer_name} - Status: {order.status}")
-    print()
-    
-    # DEBUG: Print orders info
-    print(f"📦 DEBUG: Found {len(orders)} orders")
-    if orders:
-        print(f"   First order: {orders[0].order_number}, Location: ({orders[0].latitude}, {orders[0].longitude})")
-        print(f"   Last order: {orders[-1].order_number}, Location: ({orders[-1].latitude}, {orders[-1].longitude})")
-    print()
+    logger.info(f"Found {len(orders)} orders to optimize")
     
     if not orders:
-        logger.warning("⚠️  No orders found for optimization")
+        logger.warning("No orders found for optimization")
         return schemas.RouteOptimizationResult(
             success=True,
             routes=[],
@@ -106,26 +74,14 @@ def optimize_routes(
             metadata={"message": "No orders found for optimization"}
         )
     
-    # 3. Prepare coordinates
-    # NOTE: Depots have coordinates swapped in DB (latitude column has longitude values and vice versa)
-    # Orders are stored correctly in DB (not swapped)
-    # Standard format: (latitude, longitude) throughout codebase
-    depot_coords = (depot.longitude, depot.latitude)  # Swap: DB lat column = actual lng, DB lng column = actual lat
-    order_coords = [(order.latitude, order.longitude) for order in orders]  # Orders are NOT swapped in DB, use as-is
+    # 3. Prepare coordinates (standard format: latitude, longitude)
+    depot_coords = (depot.latitude, depot.longitude)
+    order_coords = [(order.latitude, order.longitude) for order in orders]
     order_ids_list = [order.id for order in orders]
     
-    # DEBUG: Print swapped coordinates
-    print(f"🔍 [DEBUG] Coordinate swap check:")
-    print(f"   DB depot.latitude={depot.latitude}, depot.longitude={depot.longitude}")
-    print(f"   Swapped depot_coords={depot_coords} (should be lat, lng)")
-    if orders:
-        print(f"   DB order[0].latitude={orders[0].latitude}, order[0].longitude={orders[0].longitude}")
-        print(f"   order_coords[0]={order_coords[0]} (should be lat, lng - orders NOT swapped in DB)")
-    
-    # Validate depot coordinates (basic check)
-    # depot_coords is (lat, lng) after swap, so [0] is lat, [1] is lng
+    # Validate depot coordinates
     if not (-90 <= depot_coords[0] <= 90 and -180 <= depot_coords[1] <= 180):
-        logger.error(f"❌ Invalid depot coordinates: {depot_coords}")
+        logger.error(f"Invalid depot coordinates: {depot_coords}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid depot coordinates: {depot_coords}"
@@ -136,46 +92,33 @@ def optimize_routes(
     original_cluster_labels = None
     cluster_metadata = {}
     
-    # Always cluster first (recommended approach for better routes)
-    # Skip only if dataset is too small (need at least 5 orders for meaningful clusters)
     if request.use_clustering and len(orders) >= request.min_cluster_size:
-        # Use smaller cluster size to create more, manageable clusters
-        # OR-Tools performs best with clusters of 20-30 locations max
         effective_min_cluster_size = min(request.min_cluster_size, max(3, len(orders) // 30))
-        logger.info(f"🔬 Running HDBSCAN clustering (min_cluster_size={effective_min_cluster_size}, target ~20-30 per cluster)...")
+        logger.info(f"Running HDBSCAN clustering (min_cluster_size={effective_min_cluster_size})")
 
         try:
             clustering_result = ClusteringService.cluster_orders(
                 order_coords,
                 min_cluster_size=effective_min_cluster_size,
                 adaptive_clustering=True,
-                merge_small_clusters=True,  # Merge nearby small clusters
-                max_cluster_size_for_merge=5,  # Clusters with <5 orders can be merged
-                max_merge_distance_km=1.0  # Merge if within 1km
+                merge_small_clusters=True,
+                max_cluster_size_for_merge=5,
+                max_merge_distance_km=1.0
             )
-            cluster_labels = clustering_result["labels"]  # Labels with outliers assigned to nearest clusters
-            original_cluster_labels = clustering_result.get("original_labels", cluster_labels)  # Original labels with -1 for outliers
+            cluster_labels = clustering_result["labels"]
+            original_cluster_labels = clustering_result.get("original_labels", cluster_labels)
             cluster_metadata = {
                 "n_clusters": int(clustering_result["n_clusters"]),
                 "outlier_count": int(clustering_result["outlier_count"]),
                 "centroids": {int(k): list(v) for k, v in clustering_result["centroids"].items()},
-                "original_labels": original_cluster_labels.tolist()  # Include original labels for visualization
+                "original_labels": original_cluster_labels.tolist()
             }
 
-            # Check cluster sizes
             unique_labels, counts = np.unique(cluster_labels, return_counts=True)
-            max_cluster_size = counts.max()
-            avg_cluster_size = counts.mean()
+            logger.info(f"Clustering complete: {cluster_metadata['n_clusters']} clusters, {cluster_metadata['outlier_count']} outliers")
 
-            logger.info(f"✅ Clustering complete: {cluster_metadata['n_clusters']} clusters, {cluster_metadata['outlier_count']} outliers")
-            logger.info(f"   📊 Cluster sizes: max={max_cluster_size}, avg={avg_cluster_size:.1f}")
-            logger.info(f"   🎯 Target: Keep clusters under 30 locations for OR-Tools efficiency")
-
-            # For large clusters, assign multiple drivers based on delivery capacity
-            # Instead of splitting geographically, assign multiple drivers per cluster
-            driver_capacity = 15  # orders per driver per day (reduced to use more drivers)
-
-            # Count how many drivers needed per cluster
+            # Calculate drivers needed per cluster
+            driver_capacity = 15
             cluster_driver_counts = {}
             total_drivers_needed = 0
 
@@ -185,40 +128,25 @@ def optimize_routes(
                 cluster_driver_counts[label] = drivers_needed
                 total_drivers_needed += drivers_needed
 
-            logger.info(f"   🚗 Driver assignment: {total_drivers_needed} drivers needed total")
-            for label in unique_labels:
-                cluster_size = counts[list(unique_labels).index(label)]
-                drivers = cluster_driver_counts[label]
-                logger.info(f"      Cluster {label}: {cluster_size} orders → {drivers} driver{'s' if drivers > 1 else ''}")
-
             cluster_metadata["cluster_driver_counts"] = {int(k): int(v) for k, v in cluster_driver_counts.items()}
             cluster_metadata["total_drivers_needed"] = int(total_drivers_needed)
 
-            # Outliers are already assigned to nearest cluster by ClusteringService
             # Update cluster assignments in database
             crud.order.update_cluster_assignments(
                 db=db,
                 order_ids=order_ids_list,
                 cluster_labels=cluster_labels.tolist()
             )
-
-            logger.info(f"   🚗 Each cluster will get 1 dedicated driver")
         except Exception as e:
-            logger.error(f"❌ Clustering error: {e}")
+            logger.error(f"Clustering error: {e}")
             cluster_labels = None
     else:
-        logger.info(f"⏭️  Skipping clustering (use_clustering={request.use_clustering}, orders={len(orders)}, min needed=30)")
+        logger.info(f"Skipping clustering (use_clustering={request.use_clustering}, orders={len(orders)})")
     
-    # 5. Get distance matrix from Mapbox (with validation and filtering)
-    print(f"DEBUG: STARTING DISTANCE MATRIX SECTION - orders={len(orders)}")
-    logger.info(f"🗺️  Fetching distance matrix from Mapbox ({len(orders) + 1} locations)...")
-    print(f"DEBUG: About to initialize MapboxService...")
-    
+    # 5. Get distance matrix from Mapbox
+    logger.info(f"Fetching distance matrix from Mapbox ({len(orders) + 1} locations)")
     mapbox_service = MapboxService()
-    print(f"DEBUG: MapboxService created successfully - type: {type(mapbox_service)}")
-    logger.info(f"   MapboxService initialized successfully")
     
-    # Try to get distance matrix, if it fails, identify and remove problematic orders
     max_retries = 2
     valid_orders = orders.copy()
     valid_order_coords = order_coords.copy()
@@ -226,45 +154,32 @@ def optimize_routes(
     
     for attempt in range(max_retries):
         try:
-            # For small order sets, use regular matrix
             if len(valid_orders) <= 24:
-                logger.info(f"   Using standard matrix API (≤24 locations)")
                 all_coords = [depot_coords] + valid_order_coords
                 distance_matrix = mapbox_service.get_distance_matrix(all_coords, profile="driving")
             else:
-                logger.info(f"   Using chunked matrix API (>24 locations)")
-                logger.info(f"   Calling get_distance_matrix_chunked with {len(valid_order_coords)} orders...")
-                # Use chunked method for larger sets
                 distance_matrix = mapbox_service.get_distance_matrix_chunked(
                     depot_coords,
                     valid_order_coords,
                     profile="driving"
                 )
-                logger.info(f"   get_distance_matrix_chunked returned: {distance_matrix is not None}")
             
             if distance_matrix is None:
                 raise ValueError("Failed to get distance matrix from Mapbox")
             
-            # Check for NaN values before optimization
-            nan_count = np.isnan(distance_matrix).sum() if distance_matrix is not None else "N/A"
-            logger.info(f"✅ Distance matrix retrieved: {distance_matrix.shape}, NaN values: {nan_count}")
-            
-            # Success! Update the orders list
+            logger.info(f"Distance matrix retrieved: {distance_matrix.shape}")
             orders = valid_orders
             order_coords = valid_order_coords
             break
             
         except Exception as e:
             if attempt < max_retries - 1 and len(valid_orders) > 1:
-                # Try to identify problematic order by testing depot connectivity
-                logger.warning(f"⚠️  Mapbox routing failed (attempt {attempt + 1}/{max_retries}): {e}")
-                logger.info(f"🔍 Testing individual order connectivity to identify issues...")
+                logger.warning(f"Mapbox routing failed (attempt {attempt + 1}/{max_retries}): {e}")
                 
                 new_valid_orders = []
                 new_valid_coords = []
                 
-                for i, (order, coord) in enumerate(zip(valid_orders, valid_order_coords)):
-                    # Test if this order can be routed to/from depot
+                for order, coord in zip(valid_orders, valid_order_coords):
                     try:
                         test_matrix = mapbox_service.get_distance_matrix(
                             [depot_coords, coord],
@@ -275,19 +190,15 @@ def optimize_routes(
                             new_valid_coords.append(coord)
                         else:
                             excluded_orders.append(order)
-                            logger.warning(f"   ❌ Excluding order {order.order_number}: No valid route from depot")
-                    except Exception as test_error:
+                            logger.warning(f"Excluding order {order.order_number}: No valid route")
+                    except Exception:
                         excluded_orders.append(order)
-                        logger.warning(f"   ❌ Excluding order {order.order_number}: {test_error}")
                 
                 if len(new_valid_orders) < len(valid_orders):
-                    logger.info(f"   ✅ Identified {len(excluded_orders)} problematic orders, retrying with {len(new_valid_orders)} valid orders")
                     valid_orders = new_valid_orders
                     valid_order_coords = new_valid_coords
                     
-                    # Check if we have any valid orders left
                     if len(valid_orders) == 0:
-                        logger.error(f"❌ All orders excluded due to routing issues")
                         return schemas.RouteOptimizationResult(
                             success=False,
                             routes=[],
@@ -299,16 +210,15 @@ def optimize_routes(
                             solver_status="NO_VALID_ORDERS",
                             used_clustering=False,
                             num_clusters=0,
-                            metadata={"error": "All selected orders are unroutable from this depot", "excluded_orders": len(excluded_orders)}
+                            metadata={"error": "All orders are unroutable from this depot"}
                         )
                 else:
-                    logger.error(f"❌ Could not identify problematic orders")
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         detail=f"Error getting distance matrix: {str(e)}"
                     )
             else:
-                logger.error(f"❌ Distance matrix error after {attempt + 1} attempts: {e}")
+                logger.error(f"Distance matrix error: {e}")
                 if len(valid_orders) == 0:
                     return schemas.RouteOptimizationResult(
                         success=False,
@@ -321,7 +231,7 @@ def optimize_routes(
                         solver_status="NO_VALID_ORDERS",
                         used_clustering=False,
                         num_clusters=0,
-                        metadata={"error": "No orders could be routed", "excluded_orders": len(excluded_orders)}
+                        metadata={"error": "No orders could be routed"}
                     )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -329,19 +239,11 @@ def optimize_routes(
                 )
     
     if excluded_orders:
-        logger.warning(f"⚠️  Excluded {len(excluded_orders)} orders due to routing issues:")
-        for order in excluded_orders[:5]:
-            logger.warning(f"   - {order.order_number}: {order.customer_name} at ({order.latitude}, {order.longitude})")
-        if len(excluded_orders) > 5:
-            logger.warning(f"   ... and {len(excluded_orders) - 5} more")
-        
-        # Update order_ids_list to match filtered orders
+        logger.warning(f"Excluded {len(excluded_orders)} orders due to routing issues")
         order_ids_list = [order.id for order in orders]
-        logger.info(f"   ✅ Continuing with {len(orders)} valid orders")
         
-        # Re-run clustering if we had it and still have enough orders
+        # Re-run clustering if needed
         if cluster_labels is not None and len(orders) >= 5:
-            logger.info(f"   🔄 Re-running clustering with {len(orders)} valid orders...")
             effective_min_cluster_size = min(request.min_cluster_size, max(3, len(orders) // 30))
             try:
                 clustering_result = ClusteringService.cluster_orders(
@@ -349,60 +251,36 @@ def optimize_routes(
                     min_cluster_size=effective_min_cluster_size
                 )
                 cluster_labels = clustering_result["labels"]
-                unique_labels = clustering_result["unique_labels"]
-                cluster_metadata = clustering_result["metadata"]
-                
-                # Recalculate cluster stats
-                counts = [np.sum(cluster_labels == label) for label in unique_labels]
-                max_cluster_size = max(counts) if counts else 0
-                avg_cluster_size = np.mean(counts) if counts else 0
-                
-                logger.info(f"   ✅ Re-clustering complete: {cluster_metadata['n_clusters']} clusters")
-                logger.info(f"      📊 Cluster sizes: max={max_cluster_size}, avg={avg_cluster_size:.1f}")
+                cluster_metadata = {
+                    "n_clusters": int(clustering_result["n_clusters"]),
+                    "outlier_count": int(clustering_result["outlier_count"]),
+                    "centroids": {int(k): list(v) for k, v in clustering_result["centroids"].items()}
+                }
             except Exception as e:
-                logger.warning(f"   ⚠️  Re-clustering failed, continuing without clustering: {e}")
+                logger.warning(f"Re-clustering failed: {e}")
                 cluster_labels = None
                 cluster_metadata = {}
     
-    # 6. Determine number of vehicles based on clustering results
-    # IMPORTANT: Always cap at depot's available drivers!
+    # 6. Determine number of vehicles
     if cluster_labels is not None and cluster_metadata.get("total_drivers_needed"):
-        # Use total drivers needed (accounts for multiple drivers per large cluster)
         calculated_vehicles = cluster_metadata["total_drivers_needed"]
         num_vehicles = min(calculated_vehicles, depot.available_drivers)
-        if calculated_vehicles > depot.available_drivers:
-            logger.warning(f"⚠️  Clustering suggests {calculated_vehicles} drivers but depot only has {depot.available_drivers} available")
-            logger.info(f"   🚗 Capping at {num_vehicles} vehicles (depot limit)")
-        else:
-            logger.info(f"🚗 Using {num_vehicles} vehicles (based on driver capacity per cluster)")
-        logger.info(f"   Strategy: Multiple drivers per cluster based on 30 orders/driver capacity")
     elif cluster_labels is not None and cluster_metadata.get("n_clusters", 0) > 0:
-        # Fallback: use number of clusters (1 driver per cluster), but cap at depot limit
         calculated_vehicles = cluster_metadata["n_clusters"]
         num_vehicles = min(calculated_vehicles, depot.available_drivers)
-        if calculated_vehicles > depot.available_drivers:
-            logger.warning(f"⚠️  Clustering created {calculated_vehicles} clusters but depot only has {depot.available_drivers} drivers")
-            logger.info(f"   🚗 Capping at {num_vehicles} vehicles (depot limit)")
-        else:
-            logger.info(f"🚗 Using {num_vehicles} vehicles (based on {num_vehicles} natural clusters)")
-        logger.info(f"   Strategy: 1 driver per cluster, max 50 orders/driver")
     else:
-        # Fallback: use requested or depot default
         num_vehicles = request.num_vehicles if request.num_vehicles else min(depot.available_drivers, max(1, len(orders) // 50))
-        logger.info(f"🚗 Using {num_vehicles} vehicles (no clustering, {len(orders)} orders / 50 per driver)")
+    
+    logger.info(f"Using {num_vehicles} vehicles")
     
     if num_vehicles <= 0:
-        logger.error(f"❌ Invalid number of vehicles: {num_vehicles}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Number of vehicles must be greater than 0"
         )
     
-    # 7. Run OR-Tools Integrated VRP with cluster penalties
-    logger.info(f"🧮 Running OR-Tools Integrated VRP solver...")
-    logger.info(f"   Using {num_vehicles} vehicles with cluster penalty soft constraints")
-    if cluster_labels is not None:
-        logger.info(f"   Cluster penalties will discourage cross-cluster routing")
+    # 7. Run OR-Tools VRP solver
+    logger.info(f"Running OR-Tools VRP solver with {num_vehicles} vehicles")
     
     try:
         optimization_result = RouteOptimizationService.optimize_routes(
@@ -414,39 +292,19 @@ def optimize_routes(
             cluster_labels=cluster_labels
         )
         
-        logger.info(f"✅ Optimization complete: {len(optimization_result['routes'])} routes, status: {optimization_result['solver_status']}")
-        logger.info(f"   Total distance: {optimization_result['total_distance']/1000:.2f} km")
-        logger.info(f"   Total time: {optimization_result['total_time']/60:.1f} minutes")
-        
-        # Log cluster purity for each route
-        if cluster_labels is not None and optimization_result['routes']:
-            logger.info(f"   📊 Cluster Purity Analysis:")
-            for route in optimization_result['routes']:
-                if route['stops']:
-                    stop_clusters = [cluster_labels[stop['order_index']] for stop in route['stops']]
-                    unique_clusters = set(stop_clusters)
-                    dominant_cluster = max(set(stop_clusters), key=stop_clusters.count)
-                    purity = (stop_clusters.count(dominant_cluster) / len(stop_clusters)) * 100
-                    logger.info(f"      Route {route['vehicle_id']}: {len(route['stops'])} stops, Cluster {dominant_cluster} ({purity:.0f}% purity), Clusters: {unique_clusters}")
+        logger.info(f"Optimization complete: {len(optimization_result['routes'])} routes, status: {optimization_result['solver_status']}")
         
     except Exception as e:
-        logger.error(f"❌ Optimization error: {e}", exc_info=True)
-        print(f"\n[DEBUG ERROR] Exception occurred: {type(e).__name__}")
-        print(f"[DEBUG ERROR] Message: {str(e)}")
-        import traceback
-        print(f"[DEBUG ERROR] Traceback:\n{traceback.format_exc()}")
+        logger.error(f"Optimization error: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error optimizing routes: {str(e)}"
         )
     
     # 8. Format response
-    print(f"DEBUG: Building {len(optimization_result['routes'])} routes")
     optimized_routes = []
 
-    for i, route in enumerate(optimization_result["routes"]):
-        print(f"DEBUG: Processing route {i}, vehicle_id type: {type(route['vehicle_id'])}, num_orders: {route.get('num_orders', len(route['stops']))}")
-        # Build route stops
+    for route in optimization_result["routes"]:
         stops = []
         for stop in route["stops"]:
             order_idx = stop["order_index"]
@@ -462,44 +320,29 @@ def optimize_routes(
                 sequence=stop["sequence"]
             ))
         
-        # Determine predominant cluster if clustering was used
         cluster_id = None
         if cluster_labels is not None:
             stop_clusters = [int(cluster_labels[stop["order_index"]]) for stop in route["stops"]]
             if stop_clusters:
                 cluster_id = int(np.bincount(stop_clusters).argmax())
         
-        print(f"DEBUG: Creating OptimizedRoute for route {i}")
         optimized_route = schemas.OptimizedRoute(
-            vehicle_id=int(route["vehicle_id"]),  # Convert numpy to Python int
+            vehicle_id=int(route["vehicle_id"]),
             stops=stops,
-            num_stops=len(stops),  # Count actual stops
-            total_distance_km=float(route["total_distance"]) / 1000.0,  # Convert to km
-            estimated_duration_minutes=float(route["total_time"]) / 60.0,  # Convert to minutes
-            cluster_id=int(cluster_id) if cluster_id is not None else None  # Convert numpy to Python int
+            num_stops=len(stops),
+            total_distance_km=float(route["total_distance"]) / 1000.0,
+            estimated_duration_minutes=float(route["total_time"]) / 60.0,
+            cluster_id=int(cluster_id) if cluster_id is not None else None
         )
         optimized_routes.append(optimized_route)
-        print(f"DEBUG: Successfully created route {i}")
     
-    # Handle unassigned orders - convert numpy types to Python types
+    # Handle unassigned orders
     unassigned_order_ids = []
     for idx in optimization_result.get("unassigned", []):
-        # Convert numpy int64 to Python int
         idx_int = int(idx)
         if 0 <= idx_int < len(order_ids_list):
             unassigned_order_ids.append(order_ids_list[idx_int])
     
-    # Build result - ensure all numpy types are converted to Python types
-    print(f"DEBUG: About to create RouteOptimizationResult")
-    print(f"DEBUG: optimization_result keys: {list(optimization_result.keys())}")
-    for k, v in optimization_result.items():
-        if hasattr(v, 'dtype'):  # Check if it's a numpy type
-            print(f"DEBUG: numpy type found in optimization_result[{k}]: {type(v)}")
-        elif isinstance(v, list) and v and hasattr(v[0], 'dtype'):
-            print(f"DEBUG: numpy list found in optimization_result[{k}]: {type(v[0])}")
-
-    # Consider it successful if routes were created, even if solver status is PARTIAL_SUCCESS
-    # PARTIAL_SUCCESS means some orders couldn't be assigned, but routes were still created
     is_successful = (
         optimization_result["solver_status"] in ["SUCCESS", "ROUTING_SUCCESS", "PARTIAL_SUCCESS"]
         and len(optimized_routes) > 0
@@ -518,7 +361,7 @@ def optimize_routes(
         num_clusters=(
             int(cluster_metadata.get("n_clusters", 0)) + 
             int(cluster_metadata.get("outlier_count", 0))
-        ) if cluster_labels is not None else None,  # num_clusters = total groups (clusters + outliers)
+        ) if cluster_labels is not None else None,
         outlier_count=int(cluster_metadata.get("outlier_count")) if cluster_metadata.get("outlier_count") is not None else None,
         metadata={
             "depot_id": str(request.depot_id),
@@ -532,7 +375,7 @@ def optimize_routes(
                 for i, order in enumerate(orders)
             } if cluster_labels is not None else None,
             "original_cluster_assignments": {
-                str(order.id): int(original_cluster_labels[i]) if original_cluster_labels is not None and cluster_labels is not None else None
+                str(order.id): int(original_cluster_labels[i]) if original_cluster_labels is not None else None
                 for i, order in enumerate(orders)
             } if cluster_labels is not None and original_cluster_labels is not None else None,
             "total_groups": (
@@ -542,32 +385,7 @@ def optimize_routes(
         }
     )
     
-    logger.info(f"🎉 Route optimization complete!")
-    logger.info(f"   📊 Summary: {result.total_routes} routes, {result.total_orders} orders assigned, {len(unassigned_order_ids)} unassigned")
-    logger.info(f"   🚗 Distance: {result.total_distance_km:.2f} km, Duration: {result.total_duration_minutes:.1f} min")
-    
-    # DEBUG: Print final result
-    print("\n" + "="*80)
-    print(f"✅ DEBUG: Route Optimization Result for Depot: {depot.name} ({depot.id})")
-    print("="*80)
-    print(f"Success: {result.success}")
-    print(f"Total Routes: {result.total_routes}")
-    print(f"Total Orders: {result.total_orders}")
-    print(f"Total Distance: {result.total_distance_km:.2f} km")
-    print(f"Total Duration: {result.total_duration_minutes:.1f} minutes")
-    print(f"Unassigned Orders: {len(unassigned_order_ids)}")
-    print(f"Used Clustering: {result.used_clustering}")
-    print(f"Num Clusters: {result.num_clusters}")
-    print(f"Solver Status: {result.solver_status}")
-    if result.routes:
-        print(f"\n📋 Routes:")
-        for i, route in enumerate(result.routes):
-            print(f"  Route {i+1} (Vehicle {route.vehicle_id}): {route.num_stops} stops, {route.total_distance_km:.2f} km, {route.estimated_duration_minutes:.1f} min")
-            print(f"    First stop: {route.stops[0].customer_name if route.stops else 'N/A'}")
-            print(f"    Last stop: {route.stops[-1].customer_name if route.stops else 'N/A'}")
-    else:
-        print(f"\n⚠️ NO ROUTES CREATED!")
-    print("="*80 + "\n")
+    logger.info(f"Route optimization complete: {result.total_routes} routes, {result.total_orders} orders")
     
     return result
 
@@ -577,10 +395,12 @@ def test_services_connection(
     db: Session = Depends(get_db)
 ) -> dict:
     """Test connection to external services"""
+    from app.services.clustering_service import HDBSCAN_AVAILABLE
+    
     status_dict = {
         "mapbox": False,
-        "hdbscan": False,
-        "ortools": False,
+        "hdbscan": HDBSCAN_AVAILABLE,
+        "ortools": True,  # OR-Tools is a required dependency
         "database": False
     }
     
@@ -593,23 +413,9 @@ def test_services_connection(
     except Exception as e:
         status_dict["mapbox"] = f"Error: {str(e)}"
     
-    # Test HDBSCAN
-    try:
-        from app.services.clustering_service import HDBSCAN_AVAILABLE
-        status_dict["hdbscan"] = HDBSCAN_AVAILABLE
-    except Exception as e:
-        status_dict["hdbscan"] = f"Error: {str(e)}"
-    
-    # Test OR-Tools
-    try:
-        from app.services.route_optimization_service import ORTOOLS_AVAILABLE
-        status_dict["ortools"] = ORTOOLS_AVAILABLE
-    except Exception as e:
-        status_dict["ortools"] = f"Error: {str(e)}"
-    
     # Test Database
     try:
-        depot_count = len(crud.depot.get_multi(db=db, skip=0, limit=1))
+        crud.depot.get_multi(db=db, skip=0, limit=1)
         status_dict["database"] = True
     except Exception as e:
         status_dict["database"] = f"Error: {str(e)}"
@@ -618,5 +424,3 @@ def test_services_connection(
         "status": "ok" if all(v is True for v in status_dict.values() if isinstance(v, bool)) else "degraded",
         "services": status_dict
     }
-
-

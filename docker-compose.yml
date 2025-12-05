@@ -1,0 +1,64 @@
+# =============================================================================
+# ezGO POC - Docker Compose (Run from root directory)
+# =============================================================================
+#
+# Usage:
+#   docker compose up -d          # Start all services
+#   docker compose up -d db       # Start only database
+#   docker compose logs -f        # Follow all logs
+#   docker compose down           # Stop all services
+#   docker compose down -v        # Stop and remove volumes
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + PostGIS
+  # ---------------------------------------------------------------------------
+  db:
+    build: ./database
+    container_name: ezgo-db
+    environment:
+      POSTGRES_DB: ezgo-poc
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"  # Use 5433 externally to avoid conflicts
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ezgo-poc"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend (FastAPI)
+  # ---------------------------------------------------------------------------
+  backend:
+    build: ./backend
+    container_name: ezgo-backend
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/ezgo-poc
+      MAPBOX_ACCESS_TOKEN: ${MAPBOX_ACCESS_TOKEN}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Next.js)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_MAPBOX_TOKEN: ${NEXT_PUBLIC_MAPBOX_TOKEN}
+    container_name: ezgo-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

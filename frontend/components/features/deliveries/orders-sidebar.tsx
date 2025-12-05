@@ -18,14 +18,8 @@ import {
 import type { Order, Depot } from '@/lib/types';
 
 const ROUTE_COLORS = [
-  '#3b82f6', // blue
-  '#10b981', // green
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // purple
-  '#ec4899', // pink
-  '#06b6d4', // cyan
-  '#f97316', // orange
+  '#3b82f6', '#10b981', '#f59e0b', '#ef4444',
+  '#8b5cf6', '#ec4899', '#06b6d4', '#f97316',
 ];
 
 interface OrdersSidebarProps {
@@ -38,23 +32,24 @@ interface OrdersSidebarProps {
   usedDrivers: Map<string, Set<number>>;
 }
 
-export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign, isLoading, orderClusters, usedDrivers }: OrdersSidebarProps) {
-  // Selection state
+export function OrdersSidebar({ 
+  orders, 
+  depots, 
+  onAutoAssignAll, 
+  onManualAssign, 
+  isLoading, 
+  orderClusters, 
+  usedDrivers 
+}: OrdersSidebarProps) {
   const [selectedOrders, setSelectedOrders] = useState<Set<string>>(new Set());
-  const [selectedDepots, setSelectedDepots] = useState<Set<string>>(
-    new Set(depots.map(d => d.id))
-  );
+  const [selectedDepots, setSelectedDepots] = useState<Set<string>>(new Set(depots.map(d => d.id)));
   const [selectedVehicle, setSelectedVehicle] = useState<number | null>(null);
-  
-  // Track which depots are expanded
   const [expandedDepots, setExpandedDepots] = useState<Set<string>>(new Set());
 
-  // Filter orders by selected depots
   const filteredOrders = useMemo(() => {
     return orders.filter(order => order.depot_id && selectedDepots.has(order.depot_id));
   }, [orders, selectedDepots]);
 
-  // Group filtered orders by depot
   const ordersByDepot = useMemo(() => {
     return filteredOrders.reduce((acc, order) => {
       if (!order.depot_id) return acc;
@@ -64,10 +59,8 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
     }, {} as Record<string, Order[]>);
   }, [filteredOrders]);
 
-  // Auto-expand depots with orders
   useMemo(() => {
-    const depotIds = Object.keys(ordersByDepot);
-    setExpandedDepots(new Set(depotIds));
+    setExpandedDepots(new Set(Object.keys(ordersByDepot)));
   }, [ordersByDepot]);
 
   const toggleDepot = (depotId: string) => {
@@ -83,11 +76,9 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
   const totalUnassignedOrders = filteredOrders.length;
   const depotsWithOrders = Object.keys(ordersByDepot).length;
   
-  // Get depot for selected orders (for vehicle dropdown)
   const selectedOrdersDepotId = useMemo(() => {
     if (selectedOrders.size === 0) return null;
-    const selectedOrdersList = Array.from(selectedOrders);
-    const firstOrder = orders.find(o => o.id === selectedOrdersList[0]);
+    const firstOrder = orders.find(o => selectedOrders.has(o.id));
     return firstOrder?.depot_id || null;
   }, [selectedOrders, orders]);
   
@@ -95,8 +86,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
   const totalDrivers = selectedDepot?.available_drivers || 0;
   const depotUsedDrivers = selectedOrdersDepotId ? (usedDrivers.get(selectedOrdersDepotId) || new Set()) : new Set();
   const availableVehicles = Array.from({ length: totalDrivers }, (_, i) => i).filter(i => !depotUsedDrivers.has(i));
-  
-  // Handlers
+
   const toggleOrderSelection = (orderId: string) => {
     const newSelected = new Set(selectedOrders);
     if (newSelected.has(orderId)) {
@@ -132,11 +122,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
   
   const handleManualAssign = () => {
     if (selectedOrders.size === 0 || selectedVehicle === null || !selectedOrdersDepotId) return;
-    
-    const orderIds = Array.from(selectedOrders);
-    onManualAssign(orderIds, selectedVehicle, selectedOrdersDepotId);
-    
-    // Clear selections
+    onManualAssign(Array.from(selectedOrders), selectedVehicle, selectedOrdersDepotId);
     setSelectedOrders(new Set());
     setSelectedVehicle(null);
   };
@@ -171,7 +157,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
             }}
           >
             <SelectTrigger className="w-full">
-              <SelectValue placeholder="Select depots">
+              <SelectValue>
                 {selectedDepots.size === depots.length 
                   ? 'All Depots' 
                   : `${selectedDepots.size} Depot${selectedDepots.size !== 1 ? 's' : ''}`}
@@ -215,7 +201,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
                 onValueChange={(value) => setSelectedVehicle(parseInt(value))}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select vehicle">
+                  <SelectValue>
                     {selectedVehicle !== null ? `Vehicle ${selectedVehicle + 1}` : 'Select vehicle'}
                   </SelectValue>
                 </SelectTrigger>
@@ -309,9 +295,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
                           )}
                           <Checkbox
                             checked={allSelected}
-                            onCheckedChange={(checked) => {
-                              selectAllOrdersForDepot(depotId, checked as boolean);
-                            }}
+                            onCheckedChange={(checked) => selectAllOrdersForDepot(depotId, checked as boolean)}
                             onClick={(e) => e.stopPropagation()}
                           />
                           <Warehouse className="h-5 w-5 text-blue-600" />
@@ -336,7 +320,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
                   <CollapsibleContent>
                     <CardContent className="p-0">
                       <div className="max-h-96 overflow-y-auto">
-                        {depotOrders.map((order, index) => {
+                        {depotOrders.map((order) => {
                           const isSelected = selectedOrders.has(order.id);
                           const clusterId = orderClusters.get(order.id);
                           const clusterColor = clusterId !== undefined 
@@ -346,9 +330,7 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
                           return (
                             <div
                               key={order.id}
-                              className={`p-3 border-t hover:bg-gray-50 transition-colors ${
-                                isSelected ? 'bg-blue-50' : ''
-                              }`}
+                              className={`p-3 border-t hover:bg-gray-50 transition-colors ${isSelected ? 'bg-blue-50' : ''}`}
                               style={{
                                 borderLeftWidth: clusterColor ? '4px' : '0',
                                 borderLeftColor: clusterColor || 'transparent',
@@ -370,18 +352,12 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
                                       <Badge
                                         variant="outline"
                                         className="text-xs px-1.5 py-0"
-                                        style={{
-                                          borderColor: clusterColor || undefined,
-                                          color: clusterColor || undefined,
-                                        }}
+                                        style={{ borderColor: clusterColor || undefined, color: clusterColor || undefined }}
                                       >
                                         C{clusterId}
                                       </Badge>
                                     )}
-                                    <Badge
-                                      variant="secondary"
-                                      className="text-xs px-1.5 py-0"
-                                    >
+                                    <Badge variant="secondary" className="text-xs px-1.5 py-0">
                                       {order.status}
                                     </Badge>
                                   </div>
@@ -427,10 +403,3 @@ export function OrdersSidebar({ orders, depots, onAutoAssignAll, onManualAssign,
     </div>
   );
 }
-
-
-
-
-
-
-

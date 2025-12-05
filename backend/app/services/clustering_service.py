@@ -1,14 +1,18 @@
 """HDBSCAN clustering service for grouping delivery orders"""
 from typing import List, Tuple, Dict, Optional
+import logging
 import numpy as np
 from scipy.spatial.distance import cdist
 from math import radians, sin, cos, sqrt, atan2
+
+logger = logging.getLogger(__name__)
+
 try:
     import hdbscan
     HDBSCAN_AVAILABLE = True
 except ImportError:
     HDBSCAN_AVAILABLE = False
-    print("Warning: hdbscan not installed. Clustering will not be available.")
+    logger.warning("hdbscan not installed. Clustering will not be available.")
 
 
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -332,7 +336,7 @@ class ClusteringService:
                 n_subclusters = int(np.ceil(cluster_size / max_cluster_size))
                 cluster_coords = coords_array[cluster_indices]
 
-                print(f"Splitting cluster {label} ({cluster_size} points) into {n_subclusters} subclusters")
+                logger.info(f"Splitting cluster {label} ({cluster_size} points) into {n_subclusters} subclusters")
 
                 # Use K-means to split the cluster
                 kmeans = KMeans(
@@ -386,9 +390,5 @@ class ClusteringService:
             }
 
         return stats
-
-
-
-
 
 

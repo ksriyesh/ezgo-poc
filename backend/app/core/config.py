@@ -1,5 +1,18 @@
-from pydantic_settings import BaseSettings
-from typing import Optional
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Find .env file - check root first, then backend directory
+def find_env_file() -> str:
+    """Find .env file, prioritizing root directory."""
+    root_env = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    local_env = Path(__file__).resolve().parent.parent.parent / ".env"
+    
+    if root_env.exists():
+        return str(root_env)
+    if local_env.exists():
+        return str(local_env)
+    return ".env"
 
 
 class Settings(BaseSettings):
@@ -26,9 +39,10 @@ class Settings(BaseSettings):
     # H3 Configuration
     DEFAULT_H3_RESOLUTION: int = 9
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=find_env_file(),
+        case_sensitive=True,
+    )
 
 
 settings = Settings()

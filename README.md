@@ -1,109 +1,276 @@
 # ezGO POC - Route Optimization & Delivery Management System
 
-## 📖 High-Level Overview
-This project is a Proof of Concept (POC) for a delivery management system that handles **Service Areas**, **Service Zones**, **Depots**, **Orders**, and **Route Optimization**. It leverages **H3 geospatial indexing** for zone creation and **Google OR-Tools** for solving Vehicle Routing Problems (VRP).
+A Proof of Concept for a delivery management system with **H3 geospatial indexing**, **HDBSCAN clustering**, and **Google OR-Tools** for Vehicle Routing Problems (VRP).
+
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
+```bash
+# Clone and navigate to project
+cd ezgo-poc
+
+# Copy environment file and add your Mapbox token
+cp .env.example .env
+# Edit .env and add: MAPBOX_ACCESS_TOKEN=your_token_here
+
+# Start all services
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+```
+
+**Services:**
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+- API Docs: http://localhost:8000/docs
+- Database: localhost:5432
+
+### Option 2: Local Development
+
+#### Prerequisites
+- Python 3.11+
+- Node.js 20+
+- PostgreSQL 16+ with PostGIS
+- [uv](https://github.com/astral-sh/uv) (Python package manager)
+
+#### Database Setup
+```bash
+cd database
+docker compose up -d
+```
+
+#### Backend
+```bash
+cd backend
+
+# Install dependencies
+uv sync
+
+# Run migrations
+uv run alembic upgrade head
+
+# Seed database
+uv run python -m app.scripts.seed
+
+# Start server
+uv run python main.py
+```
+
+#### Frontend
+```bash
+cd frontend
+
+# Install dependencies
+npm install --legacy-peer-deps
+
+# Start dev server
+npm run dev
+```
+
+---
+
+## 📁 Project Structure
+
+```
+ezgo-poc/
+├── .env                    # Environment variables (single source of truth)
+├── docker-compose.yml      # Docker orchestration
+│
+├── backend/
+│   ├── app/
+│   │   ├── api/v1/         # API endpoints
+│   │   ├── core/           # Config, database
+│   │   ├── crud/           # Database operations
+│   │   ├── models/         # SQLAlchemy models
+│   │   ├── schemas/        # Pydantic schemas
+│   │   ├── scripts/        # Seed scripts
+│   │   └── services/       # Business logic
+│   │       ├── clustering_service.py      # HDBSCAN clustering
+│   │       ├── mapbox_service.py          # Distance matrix API
+│   │       └── route_optimization_service.py  # OR-Tools VRP
+│   ├── alembic/            # Database migrations
+│   ├── Dockerfile
+│   └── pyproject.toml
+│
+├── frontend/
+│   ├── app/                # Next.js pages
+│   ├── components/
+│   │   ├── features/       # Map view, orders sidebar
+│   │   └── ui/             # shadcn/ui components
+│   ├── lib/
+│   │   ├── api/            # Backend API client
+│   │   ├── hooks/          # React hooks
+│   │   └── map/            # H3 utilities
+│   ├── Dockerfile
+│   └── package.json
+│
+└── database/
+    ├── Dockerfile          # PostGIS image
+    └── init-extensions.sh  # PostgreSQL extensions
+```
+
+---
+
+## 🔧 Environment Variables
+
+Create a `.env` file at the project root:
+
+```env
+# Database
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/ezgo-poc
+POSTGRES_DB=ezgo-poc
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+
+# Mapbox (Required for routing)
+MAPBOX_ACCESS_TOKEN=pk.your_mapbox_token_here
+NEXT_PUBLIC_MAPBOX_TOKEN=pk.your_mapbox_token_here
+
+# Backend
+SECRET_KEY=your-secret-key-change-in-production
+
+# Frontend
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
 
 ---
 
 ## 🗄️ Database Models
-The database is designed to represent the hierarchical structure of delivery operations.
 
-### 1. Service Area (`ServiceArea`)
-*   **What it is:** A large geographical region (e.g., "Greater Ottawa").
-*   **Key Fields:** `name`, `geometry` (Polygon), `h3_resolution` (default 9).
-*   **Role:** The top-level container for all operations. It is filled with H3 hexagons to define its coverage.
-
-### 2. Service Zone (`ServiceZone`)
-*   **What it is:** A smaller subdivision of a Service Area, mimicking FSAs (Forward Sortation Areas) or neighborhoods.
-*   **Key Fields:** `name`, `geometry` (Polygon), `service_area_id`.
-*   **Role:** Created by clustering H3 cells. Orders are assigned to these zones to group deliveries geographically.
-
-### 3. Depot (`Depot`)
-*   **What it is:** A physical location (warehouse/hub) where vehicles start their routes.
-*   **Key Fields:** `name`, `latitude`, `longitude`, `geometry` (Point).
-*   **Role:** Serves specific Service Zones. Drivers pick up packages here.
-
-### 4. Order (`Order`)
-*   **What it is:** A single delivery request.
-*   **Key Fields:** `order_number`, `latitude`, `longitude`, `status` (pending/assigned), `service_zone_id`, `depot_id`.
-*   **Role:** The fundamental unit of work. It is automatically assigned to a Zone and Depot upon creation based on its location.
-
-### 5. Zone-Depot Assignment (`ZoneDepotAssignment`)
-*   **What it is:** A linking table.
-*   **Key Fields:** `zone_id`, `depot_id`.
-*   **Role:** Defines which Depot is responsible for serving which Service Zone.
-
-### 6. H3 Coverage (`H3Cover`)
-*   **What it is:** A lookup table storing the H3 cells that make up a shape.
-*   **Key Fields:** `owner_kind` (Area/Zone), `owner_id`, `resolution`, `cell` (H3 Index).
-*   **Role:** Enables fast spatial lookups (e.g., "Which zone is this point in?") without complex geometry calculations.
-
-### 7. H3 Compact (`H3Compact`)
-*   **What it is:** Compressed storage of H3 coverage.
-*   **Key Fields:** `owner_kind`, `owner_id`, `cells_compact` (Array of H3 Indices).
-*   **Role:** Optimized storage for retrieving the full shape of a zone or area.
+| Model | Description |
+|-------|-------------|
+| **ServiceArea** | Large geographical region (e.g., "Greater Ottawa") with H3 coverage |
+| **ServiceZone** | Subdivision of Service Area, created via K-means clustering |
+| **Depot** | Warehouse/hub where vehicles start routes |
+| **Order** | Delivery request with coordinates, status, zone assignment |
+| **ZoneDepotAssignment** | Links zones to their serving depot |
+| **H3Cover** | Individual H3 cells for spatial lookups |
+| **H3Compact** | Compressed H3 coverage for efficient storage |
 
 ---
 
-## 🌱 Seed Data Generation
-The seeding script (`backend/app/scripts/seed_new.py`) intelligently populates the database using geospatial algorithms.
+## 🔌 API Endpoints
 
-### Step 1: Generate Service Area with H3
-*   **Action:** Creates a large polygon (e.g., Ottawa).
-*   **Logic:** Fills this polygon with **H3 hexagons** (resolution 9) to create a discrete grid of the city.
-
-### Step 2: Create Service Zones (K-means Clustering)
-*   **Action:** Groups the thousands of H3 cells into ~10-15 manageable zones.
-*   **Logic:**
-    *   Extracts the centroid of every H3 cell.
-    *   Uses **K-means clustering** to group these centroids into `k` clusters.
-    *   Merges the cells in each cluster to form a single `ServiceZone` polygon.
-    *   **Result:** FSA-like zones that fully cover the Service Area without gaps.
-
-### Step 3: Place Depots & Assign Zones
-*   **Action:** Creates 3 depots to serve the city.
-*   **Logic:**
-    *   Calculates the centroid of each Service Zone.
-    *   Clusters these zones into 3 groups (one for each depot).
-    *   Places a Depot at the center of each group.
-    *   Assigns all zones in a group to that Depot.
-
-### Step 4: Generate Orders
-*   **Action:** Creates 90 random orders (30 per depot).
-*   **Logic:**
-    *   Generates random points within the Service Area.
-    *   Checks which Service Zone the point falls into.
-    *   Assigns the Order to that Zone and its corresponding Depot.
-    *   Ensures valid coordinates (no water bodies, etc.) via geometric checks.
-
----
-
-## 🔌 Backend Methods (API)
-The FastAPI backend exposes REST endpoints to manage these entities.
-
-*   **`/service-areas/`**: CRUD operations for service areas. Supports fetching H3 coverage.
-*   **`/service-zones/`**: CRUD for zones. Used by the frontend to display zone boundaries.
-*   **`/depots/`**: Manage depot locations and retrieve assigned zones.
-*   **`/orders/`**: Create and retrieve orders. Supports filtering by status and zone.
-*   **`/route-optimization/`**: The core intelligence engine (see below).
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/service-areas/` | List service areas with H3 coverage |
+| `GET /api/v1/service-zones/` | List zones with boundaries |
+| `GET /api/v1/depots/` | List depots and assigned zones |
+| `GET /api/v1/orders/` | List orders with filtering |
+| `POST /api/v1/routes/optimize` | Run route optimization |
+| `GET /api/v1/routes/test-connection` | Health check for services |
 
 ---
 
 ## 🧠 Route Optimization
-The optimization logic (`RouteOptimizationService`) turns a list of orders into efficient delivery routes.
 
-### Core Technology
-*   **Engine:** Google OR-Tools (Constraint Solver).
-*   **Strategy:** `GUIDED_LOCAL_SEARCH` metaheuristic.
-*   **Goal:** Minimize total distance and time while respecting constraints.
+### Technology Stack
+- **OR-Tools**: Google's constraint solver for VRP
+- **HDBSCAN**: Density-based clustering for order grouping
+- **Mapbox Matrix API**: Real-world driving distances
 
-### How it Works
-1.  **Input:** A Depot location and a list of Order locations.
-2.  **Distance Matrix:** Calculates travel times between all points (Depot ↔ Orders, Order ↔ Order).
-3.  **Constraints:**
-    *   **Vehicle Capacity:** Max orders per driver.
-    *   **Max Distance:** Limits total daily travel per vehicle (e.g., 150km).
-    *   **Cluster Penalties (Soft Constraint):** Adds a virtual "cost" if a driver crosses from one pre-defined cluster to another. This encourages drivers to stay in their neighborhood but allows crossing if it's significantly more efficient.
-4.  **Output:** Ordered list of stops for each driver, including estimated arrival times and total route distance.
-5.  **Partial Success:** If not all orders can be assigned (e.g., due to strict constraints), the solver returns a `PARTIAL_SUCCESS` status with the routes it *could* generate.
+### Process
+1. **Clustering**: HDBSCAN groups nearby orders into clusters
+2. **Distance Matrix**: Mapbox calculates travel times between all points
+3. **VRP Solver**: OR-Tools optimizes routes with constraints:
+   - Vehicle capacity
+   - Maximum travel distance
+   - Cluster penalties (soft constraint to keep drivers in neighborhoods)
+4. **Output**: Ordered stops per driver with estimated times
 
+### Solver Statuses
+- `SUCCESS`: All orders assigned
+- `PARTIAL_SUCCESS`: Some orders couldn't be assigned
+- `FAILED`: No valid routes found
+- `NO_ORDERS`: No orders to optimize
+
+---
+
+## 🐳 Docker Commands
+
+```bash
+# Build and start all services
+docker compose up -d
+
+# Rebuild after code changes
+docker compose build
+docker compose up -d
+
+# View logs
+docker compose logs -f          # All services
+docker compose logs -f backend  # Backend only
+
+# Stop services
+docker compose down
+
+# Stop and remove data
+docker compose down -v
+
+# Rebuild from scratch
+docker compose build --no-cache
+docker compose up -d
+```
+
+---
+
+## 🌱 Seeding
+
+The seed script populates the database with test data:
+
+```bash
+# Default: 12 zones, 3 depots, 90 orders
+uv run python -m app.scripts.seed
+
+# Custom parameters
+uv run python -m app.scripts.seed --zones 15 --depots 4 --orders 120
+```
+
+### What it creates:
+1. **Service Area**: Ottawa boundary with H3 coverage
+2. **Service Zones**: K-means clustered zones from H3 cells
+3. **Depots**: Strategically placed based on zone centroids
+4. **Orders**: Randomly distributed across zones
+
+---
+
+## 🛠️ Development
+
+### Backend
+```bash
+cd backend
+
+# Run tests
+uv run pytest
+
+# Format code
+uv run black .
+uv run ruff check --fix .
+
+# Create migration
+uv run alembic revision --autogenerate -m "description"
+
+# Apply migrations
+uv run alembic upgrade head
+```
+
+### Frontend
+```bash
+cd frontend
+
+# Lint
+npm run lint
+
+# Type check
+npx tsc --noEmit
+```
+
+---
+
+## 📝 License
+
+MIT
